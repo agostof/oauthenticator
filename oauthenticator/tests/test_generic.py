@@ -1,3 +1,4 @@
+import json
 from functools import partial
 
 from pytest import fixture, mark
@@ -152,7 +153,7 @@ def get_authenticator(generic_client):
         ),
     ],
 )
-async def test_generic_asd(
+async def test_generic(
     get_authenticator,
     generic_client,
     test_variation_id,
@@ -175,6 +176,7 @@ async def test_generic_asd(
         assert set(auth_model) == {"name", "admin", "auth_state"}
         assert auth_model["admin"] == expect_admin
         auth_state = auth_model["auth_state"]
+        assert json.dumps(auth_state)
         assert "access_token" in auth_state
         assert "oauth_user" in auth_state
         assert "refresh_token" in auth_state
@@ -238,3 +240,18 @@ async def test_generic_claim_groups_key_nested_strings(
 
     assert auth_model
     assert auth_model["admin"]
+
+
+@mark.parametrize(
+    "name, allowed",
+    [
+        ("allowed", True),
+        ("notallowed", False),
+    ],
+)
+async def test_check_allowed_no_auth_state(get_authenticator, name, allowed):
+    authenticator = get_authenticator(allowed_users={"allowed"})
+    # allow check always gets called with no auth model during Hub startup
+    # these are previously-allowed users who should pass until subsequent
+    # this check is removed in JupyterHub 5
+    assert await authenticator.check_allowed(name, None)

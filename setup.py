@@ -27,7 +27,7 @@ class bdist_egg_disabled(bdist_egg):
 setup_args = dict(
     name='oauthenticator',
     packages=find_packages(),
-    version="15.1.1.dev",
+    version="16.1.2.dev",
     description="OAuthenticator: Authenticate JupyterHub users with common OAuth providers",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
@@ -60,8 +60,6 @@ setup_args = dict(
             'google = oauthenticator.google:GoogleOAuthenticator',
             'local-google = oauthenticator.google:LocalGoogleOAuthenticator',
             'mediawiki = oauthenticator.mediawiki:MWOAuthenticator',
-            'okpy = oauthenticator.okpy:OkpyOAuthenticator',
-            'local-okpy = oauthenticator.okpy:LocalOkpyOAuthenticator',
             'openshift = oauthenticator.openshift:OpenShiftOAuthenticator',
             'local-openshift = oauthenticator.openshift:LocalOpenShiftOAuthenticator',
         ],

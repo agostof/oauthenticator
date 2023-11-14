@@ -1,16 +1,5 @@
-"""CILogon OAuthAuthenticator for JupyterHub
-
-Uses OAuth 2.0 with cilogon.org (override with CILOGON_HOST)
-
-Caveats:
-
-- For allowed user list /admin purposes, username will be the ePPN by default.
-  This is typically an email address and may not work as a Unix userid.
-  Normalization may be required to turn the JupyterHub username into a Unix username.
-- Default username_claim of ePPN does not work for all providers,
-  e.g. generic OAuth such as Google.
-  Use `c.CILogonOAuthenticator.username_claim = 'email'` to use
-  email instead of ePPN as the JupyterHub username.
+"""
+A JupyterHub authenticator class for use with CILogon as an identity provider.
 """
 import os
 from urllib.parse import urlparse
@@ -51,32 +40,24 @@ class CILogonLoginHandler(OAuthLoginHandler):
 
 
 class CILogonOAuthenticator(OAuthenticator):
-    _deprecated_oauth_aliases = {
-        # <deprecated-config>:
-        #   (
-        #    <new-config>,
-        #    <deprecation-version>,
-        #    <deprecated-config-and-new-config-have-same-type>
-        #   )
-        "idp_whitelist": ("allowed_idps", "0.12.0", False),
-        "idp": ("shown_idps", "15.0.0", False),
-        "strip_idp_domain": ("allowed_idps", "15.0.0", False),
-        "shown_idps": ("allowed_idps", "16.0.0", False),
-        "username_claim": ("allowed_idps", "16.0.0", False),
-        "additional_username_claims": ("allowed_idps", "16.0.0", False),
-        **OAuthenticator._deprecated_oauth_aliases,
-    }
+    login_handler = CILogonLoginHandler
 
-    login_service = "CILogon"
-
+    user_auth_state_key = "cilogon_user"
     client_id_env = 'CILOGON_CLIENT_ID'
     client_secret_env = 'CILOGON_CLIENT_SECRET'
 
-    user_auth_state_key = "cilogon_user"
+    @default("login_service")
+    def _login_service_default(self):
+        return os.environ.get("LOGIN_SERVICE", "CILogon")
 
-    login_handler = CILogonLoginHandler
-
-    cilogon_host = Unicode(os.environ.get("CILOGON_HOST") or "cilogon.org", config=True)
+    cilogon_host = Unicode(
+        os.environ.get("CILOGON_HOST") or "cilogon.org",
+        config=True,
+        help="""
+        Used to determine the default values for `authorize_url`, `token_url`,
+        and `userdata_url`.
+        """,
+    )
 
     @default("authorize_url")
     def _authorize_url_default(self):
@@ -90,22 +71,16 @@ class CILogonOAuthenticator(OAuthenticator):
     def _userdata_url_default(self):
         return f"https://{self.cilogon_host}/oauth2/userinfo"
 
-    @default("username_claim")
-    def _username_claim_default(self):
-        """What keys are available will depend on the scopes requested.
-        See https://www.cilogon.org/oidc for details.
-        Note that this option can be overridden for specific identity providers via `allowed_idps[<identity provider>]["username_derivation"]["username_claim"]`.
-        """
-        return "eppn"
-
     scope = List(
         Unicode(),
         default_value=['openid', 'email', 'org.cilogon.userinfo', 'profile'],
         config=True,
         help="""
-        The OAuth scopes to request.
+        OAuth scopes to request.
 
-        See cilogon_scope.md for details. At least 'openid' is required.
+        `openid` and `org.cilogon.userinfo` is required.
+
+        Read more about CILogon scopes in https://www.cilogon.org/oidc.
         """,
     )
 
@@ -129,14 +104,8 @@ class CILogonOAuthenticator(OAuthenticator):
 
         return scopes
 
-    idp_whitelist = List(
-        help="Deprecated, use `CIlogonOAuthenticator.allowed_idps`",
-        config=True,
-    )
-
     allowed_idps = Dict(
         config=True,
-        default_value={},
         help="""
         A dictionary of the only entity IDs that will be allowed to be used as
         login options. See https://cilogon.org/idplist for the list of
@@ -154,49 +123,60 @@ class CILogonOAuthenticator(OAuthenticator):
                         "action": "strip_idp_domain",
                         "domain": "utoronto.ca",
                     },
-                },
-                "https://github.com/login/oauth/authorize": {
-                    "username_derivation": {
-                        "username_claim": "username",
-                        "action": "prefix",
-                        "prefix": "gh",
-                    },
+                    "allow_all": True,
                 },
                 "http://google.com/accounts/o8/id": {
                     "username_derivation": {
-                        "username_claim": "username",
+                        "username_claim": "email",
+                        "action": "prefix",
+                        "prefix": "google",
                     },
                     "allowed_domains": ["uni.edu", "something.org"],
                 },
+                "https://github.com/login/oauth/authorize": {
+                    "username_derivation": {
+                        "username_claim": "preferred_username",
+                        "action": "prefix",
+                        "prefix": "github",
+                    },
+                    # allow_all or allowed_domains not specified for ths idp,
+                    # this means that its users must be explicitly allowed
+                    # with a config such as allowed_users or admin_users.
+                },
             }
+            c.Authenticator.admin_users = ["github-user1"]
+            c.Authenticator.allowed_users = ["github-user2"]
 
-        Where `username_derivation` defines:
-            * :attr:`username_claim`: string
-                The claim in the `userinfo` response from which to get the
+        This is a description of the configuration you can pass to
+        `allowed_idps`.
+
+        * `username_derivation`: string (required)
+            * `username_claim`: string (required)
+                The claim in the `userinfo` response from which to define the
                 JupyterHub username. Examples include: `eppn`, `email`. What
-                keys are available will depend on the scopes requested. It will
-                overwrite any value set through
-                CILogonOAuthenticator.username_claim for this identity provider.
-            * :attr:`action`: string What action to perform on the username.
-                Available options are "strip_idp_domain", which will strip the
-                domain from the username if specified and "prefix", which will
-                prefix the hub username with "prefix:".
-            * :attr:`domain:` string
+                keys are available will depend on the scopes requested.
+            * `action`: string
+                What action to perform on the username. Available options are
+                "strip_idp_domain", which will strip the domain from the
+                username if specified and "prefix", which will prefix the hub
+                username with "prefix:".
+            * `domain:` string (required if action is strip_idp_domain)
                 The domain after "@" which will be stripped from the username if
                 it exists and if the action is "strip_idp_domain".
-            * :attr:`prefix`: string The prefix which will be added at the
-                beginning of the username followed by a semi-column ":", if the
-                action is "prefix".
-            * :attr:`allowed_domains`: string It defines which domains will be
-                allowed to login using the specific identity provider.
+            * `prefix`: string (required if action is prefix)
+                The prefix which will be added at the beginning of the username
+                followed by a semi-column ":", if the action is "prefix".
+        * `allow_all`: bool (defaults to False)
+            Configuring this allows all users authenticating with this identity
+            provider.
+        * `allowed_domains`: list of strings
+            Configuring this together with a `username_claim` that is an email
+            address enables users to be allowed if their `username_claim` ends
+            with `@` followed by a domain in this list.
 
-        Requirements:
-            * if `username_derivation.action` is `strip_idp_domain`, then `username_derivation.domain` must also be specified
-            * if `username_derivation.action` is `prefix`, then `username_derivation.prefix` must also be specified.
-            * `username_claim` must be provided for each idp in `allowed_idps`
+        .. versionchanged:: 15.0
 
-        .. versionchanged:: 15.0.0
-            `CILogonOAuthenticaor.allowed_idps` changed type from list to dict
+           Changed format from a list to a dictionary.
         """,
     )
 
@@ -231,36 +211,6 @@ class CILogonOAuthenticator(OAuthenticator):
 
         return idps
 
-    strip_idp_domain = Bool(
-        False,
-        config=True,
-        help="""
-        Deprecated, use `CILogonOAuthenticator.allowed_idps[<ipd>]["username_derivation"]["action"] = "strip_idp_domain"`
-        to enable it and `CIlogonOAuthenticator.allowed_idps[<idp>]["username_derivation"]["domain"]` to list the domain
-        which will be stripped
-        """,
-    )
-
-    idp = Unicode(
-        config=True, help="Deprecated, use `CILogonOAuthenticator.shown_idps`."
-    )
-
-    shown_idps = List(
-        Unicode(),
-        config=True,
-        help="""
-        Deprecated, `CILogonOAuthenticator.allowed_idps` will determine the idps
-        shown.
-
-        A list of identity providers to be shown as login options. The `idp`
-        attribute is the SAML Entity ID of the user's selected identity
-        provider.
-
-        See https://cilogon.org/include/idplist.xml for the list of identity
-        providers supported by CILogon.
-        """,
-    )
-
     skin = Unicode(
         config=True,
         help="""
@@ -271,15 +221,62 @@ class CILogonOAuthenticator(OAuthenticator):
         """,
     )
 
+    # _deprecated_oauth_aliases is used by deprecation logic in OAuthenticator
+    _deprecated_oauth_aliases = {
+        "idp_whitelist": ("allowed_idps", "0.12.0", False),
+        "idp": ("shown_idps", "15.0.0", False),
+        "strip_idp_domain": ("allowed_idps", "15.0.0", False),
+        "shown_idps": ("allowed_idps", "16.0.0", False),
+        "additional_username_claims": ("allowed_idps", "16.0.0", False),
+        "username_claim": ("allowed_idps", "16.0.0", False),
+        **OAuthenticator._deprecated_oauth_aliases,
+    }
+    idp_whitelist = List(
+        config=True,
+        help="""
+        .. versionremoved:: 0.12
+
+           Use :attr:`allowed_idps`.
+        """,
+    )
+    idp = Unicode(
+        config=True,
+        help="""
+        .. versionremoved:: 15.0
+
+           Use :attr:`allowed_idps`.
+        """,
+    )
+    strip_idp_domain = Bool(
+        config=True,
+        help="""
+        .. versionremoved:: 15.0
+
+           Use :attr:`allowed_idps`.
+        """,
+    )
+    shown_idps = List(
+        config=True,
+        help="""
+        .. versionremoved:: 16.0
+
+           Use :attr:`allowed_idps`.
+        """,
+    )
     additional_username_claims = List(
         config=True,
         help="""
-        Deprecated, use `CILogonOAuthenticator.allowed_idps["username_derivation"]["username_claim"]`.
+        .. versionremoved:: 16.0
 
-        Additional claims to check if the username_claim fails.
+           Use :attr:`allowed_idps`.
+        """,
+    )
+    username_claim = Unicode(
+        config=True,
+        help="""
+        .. versionremoved:: 16.0
 
-        This is useful for linked identities where not all of them return the
-        primary username_claim.
+           Use :attr:`allowed_idps`.
         """,
     )
 
@@ -351,24 +348,26 @@ class CILogonOAuthenticator(OAuthenticator):
 
     async def check_allowed(self, username, auth_model):
         """
-        Overrides the OAuthenticator.check_allowed to also allow users part of
-        an `allowed_domains` as configured under `allowed_idps`.
+        Overrides the OAuthenticator.check_allowed to also allow users based on
+        idp specific config `allow_all` and `allowed_domains` as configured
+        under `allowed_idps`.
         """
         if await super().check_allowed(username, auth_model):
             return True
 
         user_info = auth_model["auth_state"][self.user_auth_state_key]
         user_idp = user_info["idp"]
+
+        idp_allow_all = self.allowed_idps[user_idp].get("allow_all")
+        if idp_allow_all:
+            return True
+
         idp_allowed_domains = self.allowed_idps[user_idp].get("allowed_domains")
         if idp_allowed_domains:
             unprocessed_username = self._user_info_to_unprocessed_username(user_info)
             user_domain = unprocessed_username.split("@", 1)[1].lower()
             if user_domain in idp_allowed_domains:
                 return True
-
-            message = f"Login with domain @{user_domain} is not allowed"
-            self.log.warning(message)
-            raise web.HTTPError(403, message)
 
         # users should be explicitly allowed via config, otherwise they aren't
         return False

@@ -1,7 +1,5 @@
 """
-Custom Authenticator to use Google OAuth with JupyterHub.
-
-Derived from the GitHub OAuth authenticator.
+A JupyterHub authenticator class for use with Google as an identity provider.
 """
 import os
 
@@ -14,16 +12,11 @@ from .oauth2 import OAuthenticator
 
 
 class GoogleOAuthenticator(OAuthenticator, GoogleOAuth2Mixin):
-    _deprecated_oauth_aliases = {
-        "google_group_whitelist": ("allowed_google_groups", "0.12.0"),
-        **OAuthenticator._deprecated_oauth_aliases,
-    }
-
     user_auth_state_key = "google_user"
 
-    @default("authorize_url")
-    def _authorize_url_default(self):
-        return "https://accounts.google.com/o/oauth2/v2/auth"
+    @default("login_service")
+    def _login_service_default(self):
+        return os.environ.get("LOGIN_SERVICE", "Google")
 
     @default("scope")
     def _scope_default(self):
@@ -33,7 +26,16 @@ class GoogleOAuthenticator(OAuthenticator, GoogleOAuth2Mixin):
     def _username_claim_default(self):
         return "email"
 
-    google_api_url = Unicode("https://www.googleapis.com", config=True)
+    @default("authorize_url")
+    def _authorize_url_default(self):
+        return "https://accounts.google.com/o/oauth2/v2/auth"
+
+    google_api_url = Unicode(
+        config=True,
+        help="""
+        Used to determine the default values for `token_url` and `userdata_url`.
+        """,
+    )
 
     @default("google_api_url")
     def _google_api_url(self):
@@ -56,48 +58,78 @@ class GoogleOAuthenticator(OAuthenticator, GoogleOAuth2Mixin):
 
     google_service_account_keys = Dict(
         Unicode(),
-        help="Service account keys to use with each domain, see https://developers.google.com/admin-sdk/directory/v1/guides/delegation",
-    ).tag(config=True)
+        config=True,
+        help="""
+        Service account keys to use with each domain, see https://developers.google.com/admin-sdk/directory/v1/guides/delegation
+
+        Required if and only if `allowed_google_groups` or `admin_google_groups`
+        is configured.
+        """,
+    )
 
     gsuite_administrator = Dict(
         Unicode(),
-        help="Username of a G Suite Administrator for the service account to act as",
-    ).tag(config=True)
-
-    google_group_whitelist = Dict(
-        help="Deprecated, use `GoogleOAuthenticator.allowed_google_groups`",
         config=True,
+        help="""
+        Username of a G Suite Administrator for the service account to act as.
+
+        Required if and only if `allowed_google_groups` or `admin_google_groups`
+        is configured.
+        """,
     )
 
     allowed_google_groups = Dict(
-        Set(Unicode()), help="Automatically allow members of selected groups"
-    ).tag(config=True)
+        Set(Unicode()),
+        config=True,
+        help="""
+        Allow members of selected Google groups to sign in.
+
+        Use of this requires configuration of `gsuite_administrator` and
+        `google_service_account_keys`.
+        """,
+    )
 
     admin_google_groups = Dict(
         Set(Unicode()),
-        help="Groups whose members should have Jupyterhub admin privileges",
-    ).tag(config=True)
+        config=True,
+        help="""
+        Allow members of selected Google groups to sign in and consider them as
+        JupyterHub admins.
 
-    user_info_url = Unicode(
-        "https://www.googleapis.com/oauth2/v1/userinfo", config=True
+        If this is set and a user isn't part of one of these groups or listed in
+        `admin_users`, a user signing in will have their admin status revoked.
+
+        Use of this requires configuration of `gsuite_administrator` and
+        `google_service_account_keys`.
+        """,
     )
 
     hosted_domain = List(
         Unicode(),
         config=True,
         help="""
-        Restrict sign-in to a list of email domain names, such as
-        `["mycollege.edu"]`.
+        This config has two functions.
+
+        1. Restrict sign-in to a list of email domain names, such as
+           `["mycollege.edu"]` or `["college1.edu", "college2.edu"]`.
+        2. If a single domain is specified, the username will be stripped to exclude the `@domain` part.
 
         Note that users with email domains in this list must still be allowed
-        via another config, such as `allow_all`.
+        via another config, such as `allow_all`, `allowed_users`, or
+        `allowed_google_groups`.
+
+        ```{warning} Disruptive config changes
+        Changing this config either to or from having a single entry is a
+        disruptive change as the same Google user will get a new username,
+        either without or with a domain name included.
+        ```
         """,
     )
 
     @default('hosted_domain')
     def _hosted_domain_from_env(self):
         domains = []
-        for domain in os.environ.get('HOSTED_DOMAIN', '').split(';'):
+        for domain in os.environ.get('HOSTED_DOMAIN', '').lower().split(';'):
             if domain:
                 # check falsy to avoid trailing separators
                 # adding empty domains
@@ -116,11 +148,36 @@ class GoogleOAuthenticator(OAuthenticator, GoogleOAuth2Mixin):
             return [proposal.value.lower()]
         return [hd.lower() for hd in proposal.value]
 
-    login_service = Unicode(
-        os.environ.get('LOGIN_SERVICE', 'Google'),
+    # _deprecated_oauth_aliases is used by deprecation logic in OAuthenticator
+    _deprecated_oauth_aliases = {
+        "google_group_whitelist": ("allowed_google_groups", "0.12.0"),
+        **OAuthenticator._deprecated_oauth_aliases,
+    }
+    google_group_whitelist = Dict(
         config=True,
-        help="""Google Apps hosted domain string, e.g. My College""",
+        help="""
+        .. deprecated:: 0.12
+
+           Use :attr:`allowed_google_groups`.
+        """,
     )
+
+    def user_info_to_username(self, user_info):
+        """
+        Overrides the default implementation to conditionally also strip the
+        user email's domain name from the username based on the hosted_domain
+        configuration. The domain saved to user_info for use by authorization
+        logic.
+        """
+        username = super().user_info_to_username(user_info)
+        user_email = user_info["email"]
+        user_domain = user_info["domain"] = user_email.split("@")[1].lower()
+
+        if len(self.hosted_domain) == 1 and self.hosted_domain[0] == user_domain:
+            # unambiguous domain, use only base name
+            username = username.split("@")[0]
+
+        return username
 
     async def update_auth_model(self, auth_model):
         """
@@ -131,17 +188,19 @@ class GoogleOAuthenticator(OAuthenticator, GoogleOAuth2Mixin):
         configured and the user isn't part of `admin_users`. Note that leaving
         it at None makes users able to retain an admin status while setting it
         to False makes it be revoked.
+
+        Strips the domain from the username if `hosted_domain` is configured
+        with a single entry.
         """
         user_info = auth_model["auth_state"][self.user_auth_state_key]
         user_email = user_info["email"]
-        user_domain = user_info["domain"] = user_email.split("@")[1].lower()
+        user_domain = user_info["domain"]
 
         user_groups = set()
         if self.allowed_google_groups or self.admin_google_groups:
-            user_groups = user_info["google_groups"] = self._fetch_user_groups(
-                user_email, user_domain
-            )
-        user_info["google_groups"] = user_groups
+            user_groups = self._fetch_user_groups(user_email, user_domain)
+        # sets are not JSONable, cast to list for auth_state
+        user_info["google_groups"] = list(user_groups)
 
         if auth_model["admin"]:
             # auth_model["admin"] being True means the user was in admin_users
@@ -150,7 +209,7 @@ class GoogleOAuthenticator(OAuthenticator, GoogleOAuth2Mixin):
         if self.admin_google_groups:
             # admin status should in this case be True or False, not None
             admin_groups = self.admin_google_groups.get(user_domain, set())
-            auth_model["admin"] = any(user_groups & admin_groups)
+            auth_model["admin"] = bool(user_groups & admin_groups)
 
         return auth_model
 
@@ -159,6 +218,11 @@ class GoogleOAuthenticator(OAuthenticator, GoogleOAuth2Mixin):
         Overrides the OAuthenticator.check_allowed to also allow users part of
         `allowed_google_groups`.
         """
+        # A workaround for JupyterHub < 5.0 described in
+        # https://github.com/jupyterhub/oauthenticator/issues/621
+        if auth_model is None:
+            return True
+
         # before considering allowing a username by being recognized in a list
         # of usernames or similar, we must ensure that the authenticated user
         # has a verified email and is part of hosted_domain if configured.
@@ -188,9 +252,9 @@ class GoogleOAuthenticator(OAuthenticator, GoogleOAuth2Mixin):
             return True
 
         if self.allowed_google_groups:
-            user_groups = user_info["google_groups"]
+            user_groups = set(user_info["google_groups"])
             allowed_groups = self.allowed_google_groups.get(user_domain, set())
-            if any(user_groups & allowed_groups):
+            if user_groups & allowed_groups:
                 return True
 
         # users should be explicitly allowed via config, otherwise they aren't
@@ -205,7 +269,7 @@ class GoogleOAuthenticator(OAuthenticator, GoogleOAuth2Mixin):
         except:
             raise ImportError(
                 "Could not import google.oauth2's service_account,"
-                "you may need to run pip install oauthenticator[googlegroups] or not declare google groups"
+                "you may need to run 'pip install oauthenticator[googlegroups]' or not declare google groups"
             )
 
         gsuite_administrator_email = "{}@{}".format(
@@ -229,7 +293,7 @@ class GoogleOAuthenticator(OAuthenticator, GoogleOAuth2Mixin):
         except:
             raise ImportError(
                 "Could not import googleapiclient.discovery's build,"
-                "you may need to run pip install oauthenticator[googlegroups] or not declare google groups"
+                "you may need to run 'pip install oauthenticator[googlegroups]' or not declare google groups"
             )
 
         self.log.debug(
